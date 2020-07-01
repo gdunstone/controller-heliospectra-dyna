@@ -1,5 +1,5 @@
-# controller-heliospectra
-go controller for heliospectra s7 and s10 lights
+# controller-heliospectra-dyna
+go controller for heliospectra dyna lights
 
 *multiplier* param and *MULTIPLIER* environment variable are used to change the value sent to the light
 
@@ -31,6 +31,21 @@ channels are sequentially numbered as such in conditions file:
 |channel-8  | 735nm     |
 |channel-9  | 850nm     |
 |channel-10 | 6500k     |
+
+### Heliospectra Dyna
+| channel  | wavelength|
+|---       | --        |
+|channel-1 | 380nm     |
+|channel-2 | 400nm     |
+|channel-3 | 420nm     |
+|channel-4 | 450nm     |
+|channel-5 | 530nm     |
+|channel-6 | 620nm     |
+|channel-7 | 660nm     |
+|channel-8 | 735nm     |
+|channel-9 | 5700K     |
+
+
 
 ## State of heliospectra lights and their HTTP API
 
@@ -108,6 +123,31 @@ this is a response for an S10 with all lights on max:
 
 ```
 
+this is a response for a Dyna with all channels on max:
+```xml
+<r>
+<a>2020:07:01:06:52:45</a>
+<b>Not running</b>
+<c>OK</c>
+<d>0d 02h 11m 49s</d>
+<e>2020-07-01   06:52:44</e>
+<f>Web</f>
+<g>192.168.1.200</g>
+<h>Light setting</h>
+<i>0:27.6C,</i>
+<j>0:1000,1:1000,2:1000,3:1000,4:1000,5:1000,6:1000,7:1000,8:1000,</j>
+<k>0|^|239.63.247.177|^|GC02-1|~|1|^|239.63.251.225|^|GC35-1|~|2|^|239.64.22.58|^||~|3|^|239.116.2.245|^|GC04-1|~|</k>
+<l> </l>
+<m>Master</m>
+<n>C:on:normal</n>
+<o>off:Enter your message here:heliospectra</o>
+<p> </p>
+<q>on, pool.ntp.org, 00:00:00</q>
+<s>on</s>
+<r>None:-99;Auto,Disabled</r>
+</r>
+```
+
 These responses look like XML and they are sent with the 'text/xml' Content-Type header but they dont follow the XML standard at all.
 
 My understanding of the data provided is this:
@@ -125,13 +165,13 @@ My understanding of the data provided is this:
 |h      |the type of change                 |Light setting                   |
 |i      |light plate temperatures           |0:43.5C,1:40.6C,2:45.0C,3:40.5C,|
 |j      |light intensity values             |0:1000,1:1000,2:1000,3:1000,4:1000,5:1000,6:1000,7:1000,8:1000,9:1000,|
-|k      |something about the Master         | 0|^|239.64.22.58|^||~|         |
-|l      |?                                  |                                |
-|m      |Runnning mode                      |Master                          |
-|n      |?                                  |C:on                            |
-|o      |?                                  |off:Enter your message here:heliospectra |
-|p      |?                                  |                                |
-|q      |ntp info                           |on, pool.ntp.org, 00:00:00      |
-|s      |?                                  |on                              |
-|r      |?                                  |                                |
+|k      |numbered listing of available masters         | 0|^|239.64.22.58|^||~|         |
+|l      |reserved                                  |                                |
+|m      |Lamp Control mode                      |Master                          |
+|n      |temperature units, lights on at power up, status indicator LED|C:on                            |
+|o      |schedule lock, schedule lock message, schedule lock password|off:Enter your message here:heliospectra |
+|p      |off                                  |                                |
+|q      |ntp on, ntp address, tmezone offset|on, pool.ntp.org, 00:00:00      |
+|s      |?|       |
+|r      |Wifi SSID, Wifi Signal strength,Wifi State                                  |                                |
 |t      |?                                  |                                |
