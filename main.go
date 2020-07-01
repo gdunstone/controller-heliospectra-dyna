@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/xml"
 	"github.com/appf-anu/chamber-tools"
 	"flag"
 	"fmt"
@@ -48,6 +49,7 @@ const (
 	nullTargetFloat = -math.MaxFloat32
 )
 
+
 var usage = func() {
 	use := `
 usage of %s:
@@ -86,93 +88,245 @@ channels are sequentially numbered as such in conditions file:
 		channel-8 735nm
 		channel-9 850nm
 		channel-10 6500k
+	dyna:
+		channel-1 370nm
+		channel-2 400nm
+		channel-3 420nm
+		channel-4 450nm
+		channel-5 530nm
+		channel-6 620nm
+		channel-7 660nm
+		channel-8 735nm
+		channel-9 850nm
+		channel-10 6500k
 `
 	fmt.Printf(use, os.Args[0], os.Args[0], os.Args[0])
 }
 
-
-func execCommand(conn *telnet.Conn, command string) (ret string, err error) {
-	// write command
-	conn.Write([]byte(command + "\n"))
-	// read 1 newline cos this is ours.
-	datad, err := conn.ReadString('>')
-
-	if err != nil {
-		return
+func TrimSuffix(s, suffix string) string {
+	if strings.HasSuffix(s, suffix) {
+		s = s[:len(s)-len(suffix)]
 	}
-
-	if matchOK.MatchString(datad) != true {
-		err = fmt.Errorf(strings.TrimSpace(string(datad)))
-		return
-	}
-
-	// trim...
-	ret = strings.TrimSpace(string(datad))
-	return
+	return s
 }
 
-func chompAllInts(conn *telnet.Conn, command string) (values []int, err error) {
-	data, err := execCommand(conn, command)
+type XMLRepresentation struct {
+	LightTime string `xml:"a"`
+	ScheduleStatus string `xml:"b"`
+	LightStatus string `xml:"c"`
+	Uptime string `xml:"d"`
+	LastChangeTime string `xml:"e"`
+	LastChangeReason string `xml:"f"`
+	LastChangeIp string `xml:"g"`
+	LastChangeType string `xml:"h"`
+	PanelTemperatures string `xml:"i"`
+	Intensities string `xml:"j"`
+	ControlMode string `xml:"m"`
+	UIValues1 string `xml:"n"`
+	UIValues2 string `xml:"o"`
+	NTPInfo string `xml:"q"`
+}
+
+type LightStatus struct {
+	LightTime time.Time
+	ScheduleStatus bool
+	LightStatus bool
+	Uptime time.Duration
+	LastChangeTime time.Time
+	LastChangeReason string
+	LastChangeIp string
+	LastChangeType string
+	PanelTemperatureC []float64
+	Intensities []int64
+	ControlMode string
+	UILightsOnAtPowerUp bool
+	UIStatusIndicatorLed bool
+	UIScheduleLockOn bool
+	UIScheduleLockMessage string
+	UIScheduleLockPassword string
+	NTPStatus bool
+	NTPAddress string
+	TimeZoneOffset string
+}
+
+func (lightStatus *LightStatus) Unmarshal(data string) error  {
+	xmlrep := XMLRepresentation{}
+	err := xml.Unmarshal([]byte(data), &xmlrep)
+
 	if err != nil {
-		return
+		errLog.Printf("error decoding status.xml: %v\n", err)
+		return err
 	}
 
-	// find the ints
-	tmpStrings := matchInts.FindAllString(data, -1)
-	for _, v := range tmpStrings {
-		i, err := strconv.ParseInt(v, 10, 64)
-		if err != nil {
-			return values, err
+	if xmlrep.LightTime != ""{
+		//  light time
+		lightTime, err := time.Parse("2006:01:02:15:04:05", xmlrep.LightTime)
+		if err != nil{
+			errLog.Printf("error decoding status.xml: %v\n", err)
+		} else {
+			lightStatus.LightTime = lightTime
 		}
-		values = append(values, int(i))
 	}
 
-	return
-}
-
-func chompAllStrings(conn *telnet.Conn, command string) (values []string, err error) {
-	data, err := execCommand(conn, command)
-	if err != nil {
-		return
+	if xmlrep.ScheduleStatus != ""{
+		// schedule status
+		if xmlrep.ScheduleStatus  == "Running" {
+			lightStatus.ScheduleStatus = true
+		} else {
+			lightStatus.ScheduleStatus = false
+		}
 	}
 
-	// find the ints
-	tmpStrings := matchStrings.FindAllString(data, -1)
-	values = tmpStrings[1:] // discard first string coz "OK"
-	return
-}
-
-func intToString(a []int) []string {
-	b := make([]string, len(a))
-	for i, v := range a {
-		b[i] = strconv.Itoa(v)
+	if xmlrep.LightStatus != ""{
+		// light status
+		if xmlrep.LightStatus == "OK" {
+			lightStatus.LightStatus = true
+		} else {
+			lightStatus.LightStatus = false
+		}
 	}
-	return b
+
+	if xmlrep.Uptime != ""{
+		// uptime
+		uptimeStr := strings.Replace(xmlrep.Uptime,  " ", "", -1)
+		uptimeStrSplit := strings.Split(uptimeStr, "d")
+		uptimeDuration, err := time.ParseDuration(uptimeStrSplit[len(uptimeStrSplit)-1])
+		if err != nil{
+			errLog.Printf("error decoding status.xml: %v\n", err)
+		}else {
+			if len(uptimeStrSplit) > 1{
+				if durationDays, err := strconv.ParseInt(uptimeStrSplit[0], 10, 64); err != nil{
+					errLog.Printf("error decoding status.xml: %v\n", err)
+					uptimeDuration = -1 // we error so set duration to -1 to avoid incomplete value
+				}else{
+					hours := 24 * durationDays
+					uptimeDuration += time.Duration(hours) * time.Hour
+				}
+			}
+			if uptimeDuration > 0 {
+				lightStatus.Uptime = uptimeDuration
+			}
+		}
+	}
+
+	if xmlrep.LastChangeTime != ""{
+		// last changed time
+		lastChangedTime, err := time.Parse("2006-01-02   15:04:05", xmlrep.LastChangeTime)
+		if err != nil{
+			errLog.Printf("error decoding status.xml: %v\n", err)
+		} else {
+			lightStatus.LastChangeTime = lastChangedTime
+		}
+	}
+
+	lightStatus.LastChangeReason = xmlrep.LastChangeReason
+	lightStatus.LastChangeIp = xmlrep.LastChangeIp
+	lightStatus.LastChangeType = xmlrep.LastChangeType
+
+	if xmlrep.PanelTemperatures != ""{
+		// panel temperatures
+		temperatureValuesStr := TrimSuffix(xmlrep.PanelTemperatures, ",")
+		temperatureValues := strings.Split(temperatureValuesStr, ",")
+		for _, tempStr := range temperatureValues {
+			tval := strings.Split(tempStr, ":")
+			tempStr = tval[len(tval)-1]
+			tempUnit := tempStr[len(tempStr)-1:]
+			tempValueStr := tempStr[:len(tempStr)-2]
+			tempValue, err := strconv.ParseFloat(tempValueStr, 10)
+			if err != nil{
+				errLog.Printf("error decoding status.xml: %v\n", err)
+			}else {
+				// if temperature is in freedom units, convert to something that is useful in the real world
+				if tempUnit == "F" {
+					tempValue = 5.0/9.0 * (tempValue - 32.0)
+				}
+				lightStatus.PanelTemperatureC = append(lightStatus.PanelTemperatureC, tempValue)
+			}
+		}
+	}
+	if xmlrep.Intensities != ""{
+		// light intensities
+		intensityValuesStr := TrimSuffix(xmlrep.Intensities, ",")
+		intensityValues := strings.Split(intensityValuesStr, ",")
+		for _, intStr := range intensityValues {
+			ival := strings.Split(intStr, ":")
+			intStr = ival[len(ival)-1]
+			intensityValue, err := strconv.ParseInt(intStr, 10, 64)
+
+			if err != nil{
+				errLog.Printf("error decoding status.xml: %v\n", err)
+				// if intensity has ANY error, clear the intensity slice and dont try and parse any more intensity values
+				lightStatus.Intensities = nil
+				break
+			}else {
+				lightStatus.Intensities = append(lightStatus.Intensities, intensityValue)
+			}
+		}
+	}
+	// ignore 10, and 11.
+	lightStatus.ControlMode = xmlrep.ControlMode
+
+	if xmlrep.UIValues1 != ""{
+		uiValues1 := make([]string, 3)
+
+		copy(uiValues1, strings.Split(xmlrep.UIValues1, ":"))
+		// uiValues[0] here is the temperature unit, we dont need this.
+
+		if uiValues1[1] == "on"{
+			lightStatus.UILightsOnAtPowerUp = true
+		}else if uiValues1[1] == "off"{
+			lightStatus.UILightsOnAtPowerUp = false
+		}
+
+		// for some reason this value is actually indicated true by the string "normal" instead of "on", wtf.
+		if uiValues1[2] == "normal" {
+			lightStatus.UIStatusIndicatorLed = true
+		}else if uiValues1[2] == "off" {
+			lightStatus.UIStatusIndicatorLed = false
+		}
+	}
+	if xmlrep.UIValues2 != "" {
+		uiValues2 := make([]string, 3)
+		copy(uiValues2, strings.Split(xmlrep.UIValues2, ":"))
+		if uiValues2[0] == "on" {
+			lightStatus.UIScheduleLockOn = true
+		}else if uiValues2[0] == "off" {
+			lightStatus.UIScheduleLockOn = false
+		}
+		if uiValues2[1] != ""{
+			lightStatus.UIScheduleLockMessage = uiValues2[1]
+		}
+		if uiValues2[2] != ""{
+			lightStatus.UIScheduleLockPassword = uiValues2[2]
+		}
+	}
+	// ignore 15
+	if xmlrep.NTPInfo != ""{
+		ntpValues := make([]string, 3)
+		// for some reason ntp info is comma-space separated <shrug>
+		copy(ntpValues, strings.Split(xmlrep.NTPInfo, ", "))
+		if ntpValues[0] == "on" {
+			lightStatus.NTPStatus = true
+		} else if ntpValues[0] == "off" {
+			lightStatus.NTPStatus = false
+		}
+		if ntpValues[1] != "" {
+			lightStatus.NTPAddress = ntpValues[1]
+		}
+		if ntpValues[2] != "" {
+			lightStatus.TimeZoneOffset = ntpValues[2]
+		}
+	}
+	// we arent going to bother with the wifi settings.
+	return nil
 }
 
 
-func setMany(conn *telnet.Conn, values []int) (err error) {
-	stringWls := strings.Join(intToString(values), " ")
-	command := fmt.Sprintf("setWlsRelPower %s", stringWls)
-	_, err = execCommand(conn, command)
+func setMany(ip string, values []int) (err error) {
+	fmt.Println(ip, values)
 	return
 }
 
-func setOne(conn *telnet.Conn, wl int, value int) (err error){
-	command := fmt.Sprintf("setWlRelPower %d %d", wl, value)
-	_, err = execCommand(conn, command)
-	return
-}
-
-func getPower(conn *telnet.Conn) (values []int, err error) {
-	values, err = chompAllInts(conn, "getAllRelPower")
-	return
-}
-
-func getWl(conn *telnet.Conn) (values []string, err error) {
-	values, err = chompAllStrings(conn, "getWl")
-	return
-}
 
 // runStuff, should send values and write metrics.
 // returns true if program should continue, false if program should retry
