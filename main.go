@@ -2,14 +2,17 @@ package main
 
 import (
 	"encoding/xml"
-	"github.com/appf-anu/chamber-tools"
 	"flag"
 	"fmt"
+	"github.com/appf-anu/chamber-tools"
 	"github.com/mdaffin/go-telegraf"
-	"github.com/ziutek/telnet"
+	"io/ioutil"
 	"log"
 	"math"
+	"net/http"
+	"net/url"
 	"os"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -22,7 +25,8 @@ var (
 
 var (
 	noMetrics, dummy, loopFirstDay            bool
-	address                                   string
+	address		  							  string
+	statusUrl, intensityUrl					  *url.URL
 	multiplier                                float64
 	conditionsPath, hostTag, groupTag, didTag string
 	interval                                  time.Duration
@@ -89,7 +93,7 @@ channels are sequentially numbered as such in conditions file:
 		channel-9 850nm
 		channel-10 6500k
 	dyna:
-		channel-1 370nm
+		channel-1 380nm
 		channel-2 400nm
 		channel-3 420nm
 		channel-4 450nm
@@ -97,11 +101,48 @@ channels are sequentially numbered as such in conditions file:
 		channel-6 620nm
 		channel-7 660nm
 		channel-8 735nm
-		channel-9 850nm
-		channel-10 6500k
+		channel-9 5700K
 `
 	fmt.Printf(use, os.Args[0], os.Args[0], os.Args[0])
 }
+
+var WavelengthsS7 = []string{
+	"400nm",
+	"420nm",
+	"450nm",
+	"530nm",
+	"630nm",
+	"660nm",
+	"735nm",
+}
+
+
+var WavelengthsS10 = []string{
+	"370nm",
+	"400nm",
+	"420nm",
+	"450nm",
+	"530nm",
+	"620nm",
+	"660nm",
+	"735nm",
+	"850nm",
+	"6500k",
+}
+
+
+var WavelengthsDyna = []string{
+	"380nm",
+	"400nm",
+	"420nm",
+	"450nm",
+	"530nm",
+	"620nm",
+	"660nm",
+	"735nm",
+	"5700K",
+}
+
 
 func TrimSuffix(s, suffix string) string {
 	if strings.HasSuffix(s, suffix) {
@@ -138,6 +179,7 @@ type LightStatus struct {
 	LastChangeType string
 	PanelTemperatureC []float64
 	Intensities []int64
+	TargetIntensities []int64
 	ControlMode string
 	UILightsOnAtPowerUp bool
 	UIStatusIndicatorLed bool
@@ -147,12 +189,12 @@ type LightStatus struct {
 	NTPStatus bool
 	NTPAddress string
 	TimeZoneOffset string
+	ExecutedTimepoint bool
 }
 
-func (lightStatus *LightStatus) Unmarshal(data string) error  {
+func (lightStatus *LightStatus) Unmarshal(data []byte) error  {
 	xmlrep := XMLRepresentation{}
-	err := xml.Unmarshal([]byte(data), &xmlrep)
-
+	err := xml.Unmarshal(data, &xmlrep)
 	if err != nil {
 		errLog.Printf("error decoding status.xml: %v\n", err)
 		return err
@@ -285,6 +327,7 @@ func (lightStatus *LightStatus) Unmarshal(data string) error  {
 			lightStatus.UIStatusIndicatorLed = false
 		}
 	}
+
 	if xmlrep.UIValues2 != "" {
 		uiValues2 := make([]string, 3)
 		copy(uiValues2, strings.Split(xmlrep.UIValues2, ":"))
@@ -300,6 +343,7 @@ func (lightStatus *LightStatus) Unmarshal(data string) error  {
 			lightStatus.UIScheduleLockPassword = uiValues2[2]
 		}
 	}
+
 	// ignore 15
 	if xmlrep.NTPInfo != ""{
 		ntpValues := make([]string, 3)
@@ -322,107 +366,85 @@ func (lightStatus *LightStatus) Unmarshal(data string) error  {
 }
 
 
-func setMany(ip string, values []int) (err error) {
-	fmt.Println(ip, values)
-	return
+func GetLightStatus() (*LightStatus, error) {
+	v := new(LightStatus)
+	resp, err := http.Get(statusUrl.String())
+	if err != nil{
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	err = v.Unmarshal(data)
+	if err != nil {
+		return nil, err
+	}
+	return v, nil
 }
 
+
+func setMany(values []int64) (err error) {
+	delim := ":"
+	intensityQueryStringValues := strings.Trim(strings.Replace(fmt.Sprint(values), " ", delim, -1), "[]")
+	q := url.Values{}
+	q.Set("int", intensityQueryStringValues)
+	intensityUrl.RawQuery = q.Encode()
+	_, err = http.Get(intensityUrl.String())
+	return err
+}
 
 // runStuff, should send values and write metrics.
 // returns true if program should continue, false if program should retry
 func runStuff(point *chamber_tools.TimePoint) bool {
 
-	conn, err := telnet.DialTimeout("tcp", address, time.Second*30)
+	status, err := GetLightStatus()
 	if err != nil {
-		errLog.Println(err)
+		// should retry in 5 seconds because we couldn't contact the light.
+		time.Sleep(5)
 		return false
 	}
-	defer conn.Close()
-	// wait at least a second for the connection to init.
-	time.Sleep(time.Millisecond * 100)
-	err = conn.SkipUntil("\n>")
-	if err != nil {
-		errLog.Printf("Error getting heliospectra shell: %v\n", err)
+	wavelengths := make([]string, 0)
+	switch len(status.Intensities) {
+	case len(WavelengthsDyna):
+		wavelengths = WavelengthsDyna
+	case len(WavelengthsS10):
+		wavelengths = WavelengthsS10
+	case len(WavelengthsS7):
+		wavelengths = WavelengthsS7
+	default:
+		errLog.Printf("got incorrect number of intensities from device: %d\n", len(status.Intensities))
 		return false
 	}
 
-	wavelengths, err := getWl(conn)
-	if err != nil {
-		errLog.Println(err)
-		return false
-	}
-	minLength := chamber_tools.Min(len(wavelengths), len(point.Channels))
-	if len(point.Channels) < len(wavelengths){
-		errLog.Printf("Number of light values in control file (%d) less than wavelengths/channels for this " +
-			"light (%d), ignoring some channels.\n", len(point.Channels), len(wavelengths))
-	}
-	if len(point.Channels) > len(wavelengths) {
-		errLog.Printf("Number of light values in control file (%d) greater than wavelengths/channels for " +
-			"this light (%d), ignoring some channels.\n", len(point.Channels), len(wavelengths))
+	if len(wavelengths) != len(point.Channels){
+		errLog.Printf("timepoint/device %d/%d channel number mismatch, ignoring timepoint\n", len(point.Channels), len(status.Intensities))
+		return true
 	}
 
-	// make intvals the minimum length
-	intVals := make([]int, minLength)
-	negVal := false
-	// iterate over the minimum length
-	for i := range intVals {
+	status.TargetIntensities = make([]int64, len(point.Channels))
+	for idx, targetIntensity := range point.Channels {
 		// multiply all the channel values by the multiplier.
 		// none of the heliospectras accept values over 1000, so clamp
-		if point.Channels[i] == chamber_tools.NullTargetFloat64 || point.Channels[i] < 0 {
-			negVal = true
-			intVals[i] = chamber_tools.NullTargetInt
+		if targetIntensity == chamber_tools.NullTargetFloat64 || targetIntensity < 0 {
+			status.TargetIntensities[idx] = status.Intensities[idx]
 			continue
-		}
-
-		intVals[i] = chamber_tools.Clamp(int(point.Channels[i] * multiplier), 0, 1000)
-	}
-	// handle negative / non-provided values
-	if negVal {
-		for i, value := range intVals {
-			// skip negative values
-			if value == chamber_tools.NullTargetInt || value < 0 {
-				continue
-			}
-
-			// get the wavelength as an int
-			wlInt, err := strconv.Atoi(strings.TrimSpace(wavelengths[i])) // get the wavelength as an int
-			if err != nil {
-				errLog.Printf("error converting wavelength value %s to int to set value %d\n",
-					wavelengths[i], value)
-				errLog.Println(err)
-				continue
-			}
-			// sleep for a bit we wait for the light to be ready
-			time.Sleep(time.Millisecond*200)
-			// set the value
-			err = setOne(conn, wlInt, value)
-			if err != nil {
-				errLog.Printf("Couldn't set wl %s to %d\n", wlInt, value)
-				errLog.Println(err)
-				continue
-			}
-		}
-	} else {
-		err = setMany(conn, intVals)
-		if err != nil {
-			errLog.Println(err)
-			return false
+		}else{
+			status.TargetIntensities[idx] = int64(chamber_tools.Clamp(int(targetIntensity * multiplier), 0, 1000))
 		}
 	}
 
-	errLog.Println("scaling ", multiplier)
-	errLog.Printf("ran %s %+v", point.Datetime.Format(time.RFC3339), intVals)
-
-	time.Sleep(time.Millisecond * 50)
-	returnedLv, err := getPower(conn)
+	err = setMany(status.TargetIntensities)
 	if err != nil {
 		errLog.Println(err)
 		return false
 	}
-	errLog.Printf("got %s %+v", point.Datetime.Format(time.RFC3339), returnedLv)
+	status.ExecutedTimepoint = true
+	errLog.Printf("ran %s %+v", point.Datetime.Format(time.RFC3339), status.TargetIntensities)
 
 	for x := 0; x < 5; x++ {
-		if err := writeMetrics(wavelengths, returnedLv); err != nil {
+		if err := writeMetrics(status); err != nil {
 			errLog.Println(err)
 			time.Sleep(200 * time.Millisecond)
 			continue
@@ -432,50 +454,39 @@ func runStuff(point *chamber_tools.TimePoint) bool {
 	return true
 }
 
-func writeMetrics(wavelengths []string, lightValues []int) error {
-	if !noMetrics {
-		telegrafHost := "telegraf:8092"
-		if os.Getenv("TELEGRAF_HOST") != "" {
-			telegrafHost = os.Getenv("TELEGRAF_HOST")
-		}
-
-		telegrafClient, err := telegraf.NewUDP(telegrafHost)
-		if err != nil {
-			return err
-		}
-		defer telegrafClient.Close()
-
-		m := telegraf.NewMeasurement("heliospectra-light")
-		if len(wavelengths) != len(lightValues) {
-			return fmt.Errorf("wavelengths and light values differ")
-		}
-
-		for i, v := range lightValues {
-			wl, err := strconv.ParseInt(wavelengths[i], 10, 64)
-			if err != nil {
-				errLog.Println(err)
-				continue
-			}
-			if wl == 6500 {
-				m.AddInt(fmt.Sprintf("%dk", wl), v)
-				continue
-			}
-			m.AddInt(fmt.Sprintf("%dnm", wl), v)
-		}
-		if hostTag != "" {
-			m.AddTag("host", hostTag)
-		}
-		if groupTag != "" {
-			m.AddTag("group", groupTag)
-		}
-		if didTag != "" {
-			m.AddTag("did", didTag)
-		}
-
-		telegrafClient.Write(m)
+func writeMetrics(status *LightStatus) error {
+	telegrafHost := "telegraf:8092"
+	if tthost := os.Getenv("TELEGRAF_HOST"); tthost != "" {
+		telegrafHost = tthost
 	}
-	return nil
+
+	telegrafClient, err := telegraf.NewUDP(telegrafHost)
+	if err != nil {
+		errLog.Println(err)
+		return err
+	}
+	defer telegrafClient.Close()
+
+	m := telegraf.NewMeasurement("heliospectra2")
+
+	va := reflect.ValueOf(&status).Elem()
+	for i := 0; i < va.NumField(); i++ {
+		chamber_tools.DecodeStructFieldToMeasurement(&m, va, i)
+	}
+
+	if hostTag != "" {
+		m.AddTag("host", hostTag)
+	}
+	if groupTag != "" {
+		m.AddTag("group", groupTag)
+	}
+	if didTag != "" {
+		m.AddTag("did", didTag)
+	}
+
+	return telegrafClient.Write(m)
 }
+
 
 func init() {
 	var err error
@@ -483,9 +494,26 @@ func init() {
 
 	if address = os.Getenv("ADDRESS"); address == "" {
 		address = flag.Arg(0)
+		u, err := url.Parse(address)
 		if err != nil {
 			panic(err)
 		}
+		u.Scheme = "http"
+		u.Path = "/"
+		u.RawQuery = ""
+
+		statusUrl, err = url.Parse(u.String())
+		if err != nil {
+			panic(err)
+		}
+		statusUrl.Path = "/status.xml"
+
+		intensityUrl, err = url.Parse(u.String())
+		if err != nil {
+			panic(err)
+		}
+		intensityUrl.Path = "/intensity.cgi"
+		intensityUrl.RawQuery = ""
 	}
 
 	errLog = log.New(os.Stderr, "[heliospectra] ", log.Ldate|log.Ltime|log.Lshortfile)
@@ -538,7 +566,7 @@ func init() {
 	if tempV := os.Getenv("CONDITIONS_FILE"); tempV != "" {
 		conditionsPath = tempV
 	}
-	flag.DurationVar(&interval, "interval", time.Minute*10, "interval to run conditions/record metrics at")
+	flag.DurationVar(&interval, "interval", time.Minute*10, "interval to record metrics at")
 	if tempV := os.Getenv("INTERVAL"); tempV != "" {
 		interval, err = time.ParseDuration(tempV)
 		if err != nil {
@@ -573,32 +601,19 @@ func init() {
 func main() {
 	if !noMetrics && (conditionsPath == "" || dummy) {
 		runMetrics := func() {
-			conn, err := telnet.DialTimeout("tcp", address, time.Second*30)
-			if err != nil {
-				errLog.Println(err)
-			}
-			defer conn.Close()
-			time.Sleep(time.Millisecond * 100)
-			err = conn.SkipUntil(">")
+			status, err := GetLightStatus()
 			if err != nil {
 				errLog.Println(err)
 				return
 			}
-
-			lightPower, err := getPower(conn)
-			if err != nil {
-				errLog.Println(err)
-				return
+			for x := 0; x < 5; x++ {
+				if err := writeMetrics(status); err != nil {
+					errLog.Println(err)
+					time.Sleep(200 * time.Millisecond)
+					continue
+				}
+				break
 			}
-			lightWavelengths, err := getWl(conn)
-			if err != nil {
-				errLog.Println(err)
-				return
-			}
-			writeMetrics(lightWavelengths, lightPower)
-
-			fmt.Println("wavelengths:\t\t", lightWavelengths)
-			fmt.Println("power:\t\t", lightPower)
 		}
 
 		runMetrics()
