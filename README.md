@@ -1,4 +1,8 @@
 # controller-heliospectra-dyna
+
+this repo is deprecated and old, new repo is at https://gitlab.com/appf-anu/controller-heliospectra2
+
+
 go controller for heliospectra dyna lights
 
 *multiplier* param and *MULTIPLIER* environment variable are used to change the value sent to the light
